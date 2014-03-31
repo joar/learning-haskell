@@ -1,3 +1,4 @@
+-- following http://www.haskell.org/haskellwiki/Implement_a_chat_server
 import System.IO
 
 import Network.Socket
