@@ -1,8 +1,19 @@
+import System.IO
+
 import Network.Socket
+
 import Control.Monad
+import Control.Monad.Fix (fix)
+import Control.Exception
+import Control.Concurrent
+import Control.Concurrent.Chan
+
+type Msg = (Int, String)
 
 main :: IO ()
 main = do
+  chan <- newChan
+
   -- accept one connection and handle it
   sock <- socket AF_INET Stream 0
   setSocketOption sock ReuseAddr 1
@@ -10,14 +21,48 @@ main = do
   bindSocket sock (SockAddrInet 4242 iNADDR_ANY)
   -- allow a maximum of 2 outstanding connections
   listen sock 2
-  mainLoop sock
 
-mainLoop :: Socket -> IO ()
-mainLoop sock = forever $ do
+  forkIO $ fix $ \loop -> do
+    (_, msg) <- readChan chan
+    loop
+
+  putStrLn "Starting mainloop"
+  mainLoop sock chan 0
+
+
+mainLoop :: Socket -> Chan Msg -> Int -> IO ()
+mainLoop sock chan nr = do
   conn <- accept sock
-  runConn conn
+  forkIO $ runConn conn chan nr
+  mainLoop sock chan $! nr+1
 
-runConn :: (Socket, SockAddr) -> IO ()
-runConn (sock, _) = do
-  send sock "Hi!\n"
-  sClose sock
+
+runConn :: (Socket, SockAddr) -> Chan Msg -> Int -> IO ()
+runConn (sock, _) chan nr = do
+  let broadcast msg = writeChan chan (nr, msg)
+  hdl <- socketToHandle sock ReadWriteMode
+  hSetBuffering hdl NoBuffering
+
+  hPutStrLn hdl "Hi, what's your name?"
+  name <- liftM init (hGetLine hdl)
+  broadcast ("--> " ++ name ++ " entered.")
+  hPutStrLn hdl ("Welcome, " ++ name ++ "!")
+
+  chan' <- dupChan chan
+
+  reader <- forkIO $ fix $ \loop -> do
+    (nr', line) <- readChan chan'
+    when (nr /= nr') $ hPutStrLn hdl line
+    loop
+
+  handle (\(SomeException _) -> return ()) $ fix $ \loop -> do
+    line <- liftM init $ hGetLine hdl
+    case line of
+      "quit" -> hPutStrLn hdl "Bye!"
+      _      -> do
+          broadcast $ name ++ ": " ++ line
+          loop
+
+  killThread reader
+  broadcast $ "<-- " ++ name ++ " left."
+  hClose hdl
